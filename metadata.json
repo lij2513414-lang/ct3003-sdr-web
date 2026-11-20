@@ -1,0 +1,6 @@
+{
+  "name": "CT3003 SDR IQ Stream Viewer",
+  "description": "High-performance Canvas2D SDR IQ spectrum, waterfall, time-domain, constellation, and BLE 1M advertising analyzer with React shadcn/ui controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

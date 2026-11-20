@@ -1,0 +1,457 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: MIT -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>CT3003 SDR IQ Stream Viewer</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230b1322'/%3E%3Cpath d='M4 22 Q10 6 16 16 T28 10' fill='none' stroke='%2338bdf8' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script defer src="dsp.js"></script>
+  <script defer src="render.js"></script>
+  <script defer src="ble.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <button id="btn-sidebar" class="btn btn-icon" type="button" title="Toggle Sidebar">&#9776;</button>
+    <div class="brand">
+      <span class="brand-title">CT3003 IQ</span>
+      <span class="brand-sub">MT7981B · WMIQ</span>
+    </div>
+
+    <div class="ctrl-group">
+      <label for="sel-source">Source</label>
+      <select id="sel-source">
+        <option value="ws">Direct Router (WS)</option>
+        <option value="http">Direct Router (HTTP)</option>
+        <option value="file">Local File Playback</option>
+        <option value="synthetic">Synthetic Generator</option>
+      </select>
+    </div>
+
+    <button id="btn-stream" class="btn btn-primary" type="button">&#9654; Start Streaming</button>
+    <button id="btn-oneshot" class="btn" type="button">One-Shot</button>
+
+    <div class="ctrl-group">
+      <label for="btn-band-0">Band</label>
+      <div class="band-switch" id="band-switch" role="group" aria-label="2.4G / 5G Band Switch">
+        <button id="btn-band-0" class="band-btn active" data-band="0" type="button">2.4G</button>
+        <button id="btn-band-1" class="band-btn" data-band="1" type="button">5G</button>
+      </div>
+    </div>
+
+    <div class="ctrl-group">
+      <label for="sel-node-preset">Node</label>
+      <select id="sel-node-preset" title="Select verified ICAP NODE preset">
+        <option value="15" selected>15 · ADC WF1/0 (12b)</option>
+        <option value="6">6 · RXFD WF1/0 (14b)</option>
+        <option value="8">8 · RXFD WF2/0 (14b)</option>
+        <option value="custom">Custom</option>
+      </select>
+      <input id="inp-node" type="number" min="0" max="63" value="15" title="ICAP NODE table index (15=ADC WF1/0, 6=RXFD WF1/0, 8=RXFD WF2/0)">
+    </div>
+
+    <div class="ctrl-group">
+      <label for="sel-len">Words</label>
+      <select id="sel-len">
+        <option value="1024">1024</option>
+        <option value="2048">2048</option>
+        <option value="4096">4096</option>
+        <option value="8192" selected>8192</option>
+        <option value="16384">16384</option>
+      </select>
+    </div>
+
+    <div class="ctrl-group">
+      <label for="sel-mode">Mode</label>
+      <select id="sel-mode" title="Node 15 (ADC) streaming requires API mode; Node 6/8 support Direct">
+        <option value="api" selected>API</option>
+        <option value="direct">Direct</option>
+      </select>
+    </div>
+
+    <div class="ctrl-group">
+      <label for="sel-bw">BW</label>
+      <select id="sel-bw">
+        <option value="0" selected>0</option>
+        <option value="1">1</option>
+        <option value="2">2</option>
+        <option value="3">3</option>
+      </select>
+    </div>
+
+    <div class="ctrl-group">
+      <label for="sel-fps-limit">FPS Limit</label>
+      <select id="sel-fps-limit" title="Limit UI sampling and refresh rate (0 = Unlimited, follow display refresh)">
+        <option value="0" selected>Unlimited</option>
+        <option value="400">400 Hz</option>
+        <option value="200">200 Hz</option>
+        <option value="120">120 Hz</option>
+        <option value="60">60 Hz</option>
+        <option value="30">30 Hz</option>
+        <option value="20">20 Hz</option>
+        <option value="15">15 Hz</option>
+        <option value="10">10 Hz</option>
+        <option value="5">5 Hz</option>
+        <option value="2">2 Hz</option>
+        <option value="1">1 Hz</option>
+      </select>
+    </div>
+
+    <button id="btn-download" class="btn" type="button" title="Export current raw buffer as .bin">Save .bin</button>
+
+    <div class="pane-toggles" role="group" aria-label="Pane Visibility Toggles">
+      <button class="btn-toggle active" data-pane-toggle="spectrum" aria-pressed="true" type="button">Spectrum</button>
+      <button class="btn-toggle active" data-pane-toggle="waterfall" aria-pressed="true" type="button">Waterfall</button>
+      <button class="btn-toggle active" data-pane-toggle="time" aria-pressed="true" type="button">Time</button>
+      <button class="btn-toggle active" data-pane-toggle="constellation" aria-pressed="true" type="button">Constellation</button>
+      <button class="btn-toggle" data-pane-toggle="ble" aria-pressed="false" type="button">BLE</button>
+    </div>
+
+    <div class="pills">
+      <span id="pill-conn" class="pill"><span class="dot"></span><span id="pill-conn-text">Disconnected</span></span>
+      <span id="pill-fw" class="pill">fw: -</span>
+      <span id="pill-tick" class="pill">tick: -</span>
+      <span id="pill-cr" class="pill">cr0/9: -</span>
+      <span id="pill-fps" class="pill">0.0 fps</span>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <aside id="sidebar" class="sidebar">
+      <details class="section" open>
+        <summary>Source &amp; Direct Router</summary>
+        <div class="form-grid" style="margin-bottom:6px">
+          <label for="inp-router-url">Router URL</label>
+          <input id="inp-router-url" type="text" placeholder="http://192.168.6.2:8088" title="Leave empty for same-origin (or http://192.168.6.2:8088 on file://)">
+        </div>
+        <div class="btn-row" style="margin-bottom:8px">
+          <button id="btn-use-router" class="btn btn-sm" type="button">Direct 192.168.6.2:8088</button>
+          <button id="btn-use-origin" class="btn btn-sm" type="button">Same Origin</button>
+        </div>
+        <div class="file-box">
+          <input id="inp-file" type="file" accept=".bin,.iq,.s16le,.cs16,.s32le,.cs32,.cf32,.fc32,.raw">
+          <p class="file-note" id="file-info">Drop .bin / .s16le / .s32le / .cf32 onto page</p>
+        </div>
+
+        <div class="form-grid" id="server-samples-row" hidden>
+          <label for="sel-server-sample">Samples</label>
+          <select id="sel-server-sample"></select>
+        </div>
+
+        <div class="form-grid">
+          <label for="sel-synth">Synth Preset</label>
+          <select id="sel-synth">
+            <option value="ofdm_wifi">Wi-Fi OFDM Carriers</option>
+            <option value="multitone">Multi-tone CW + Noise</option>
+            <option value="qpsk_burst">QPSK Modulated Burst</option>
+            <option value="sweep">Chirp Sweep</option>
+          </select>
+
+          <label for="inp-interval">Interval (ms)</label>
+          <input id="inp-interval" type="number" min="0" max="5000" step="10" value="0" title="0 = full-rate hardware stream; ~60 fps in demo mode">
+        </div>
+
+        <div class="playback-bar" id="file-playback-bar" hidden>
+          <div class="range-row">
+            <span class="mono" style="font-size:11px;color:var(--muted)">Offset</span>
+            <input id="rng-file-pos" type="range" min="0" max="0" step="1" value="0">
+            <output id="out-file-pos">0</output>
+          </div>
+          <div class="btn-row">
+            <button id="btn-file-play" class="btn btn-sm" type="button">&#9654; Play File</button>
+            <button id="btn-file-step" class="btn btn-sm" type="button">Step Frame</button>
+            <button id="btn-status-refresh" class="btn btn-sm" type="button">Status</button>
+          </div>
+        </div>
+      </details>
+
+      <details class="section" open>
+        <summary>Format &amp; RF Scale</summary>
+        <div class="form-grid">
+          <label for="sel-format">Format</label>
+          <select id="sel-format">
+            <option value="u32_12" selected>CT3003 Packed u32 (12b)</option>
+            <option value="u32_14">Packed u32 (14b)</option>
+            <option value="u32_16">Packed u32 (16b)</option>
+            <option value="s16le">Interleaved s16le</option>
+            <option value="s32le">Interleaved s32le</option>
+            <option value="cf32">Complex float32</option>
+          </select>
+
+          <label for="sel-header">Header Strip</label>
+          <select id="sel-header">
+            <option value="auto" selected>Auto (WSIQ/ICAP/IQUD)</option>
+            <option value="none">None (Raw)</option>
+            <option value="wsiq">WSIQ (32B)</option>
+            <option value="icap">ICAP (28B Stream)</option>
+            <option value="iqud">IQUD (44B)</option>
+          </select>
+
+          <label for="sel-stream">Antenna Lane</label>
+          <select id="sel-stream" title="CT3003 hardware interleaves WF0 (even) / WF1 (odd) u32 words">
+            <option value="all" selected>All Words (Raw / Synth)</option>
+            <option value="even">WF0 Even w[0::2] (HW)</option>
+            <option value="odd">WF1 Odd w[1::2] (HW)</option>
+          </select>
+
+          <label for="inp-fs">Sample Rate (MHz)</label>
+          <input id="inp-fs" type="number" min="0.1" max="640" step="any" value="80" title="Single-chain ADC sample rate (80 Msps on Band 0)">
+
+          <label for="inp-lo">Center (MHz)</label>
+          <input id="inp-lo" type="number" min="0" max="7500" step="0.5" value="2462" title="Band0/1 RF LO frequency">
+        </div>
+
+        <div class="checks">
+          <label><input id="chk-swap" type="checkbox"> Swap I/Q</label>
+          <label><input id="chk-dc" type="checkbox"> DC Remove</label>
+        </div>
+        <div class="btn-row" style="margin-top:6px">
+          <button id="btn-sync-rf" class="btn btn-sm" type="button">Sync HW Fs / LO</button>
+        </div>
+        <p class="file-note" id="rf-hw-info" style="margin-top:4px">RF: Waiting for ChInfo...</p>
+      </details>
+
+      <details class="section" open>
+        <summary>FFT &amp; Plot Display</summary>
+        <div class="form-grid">
+          <label for="sel-fft-size">FFT Size</label>
+          <select id="sel-fft-size">
+            <option value="512">512</option>
+            <option value="1024">1024</option>
+            <option value="2048" selected>2048</option>
+            <option value="4096">4096</option>
+            <option value="8192">8192</option>
+          </select>
+
+          <label for="sel-window">Window</label>
+          <select id="sel-window">
+            <option value="blackmanharris" selected>Blackman-Harris</option>
+            <option value="hann">Hann</option>
+            <option value="hamming">Hamming</option>
+            <option value="rect">Rectangular</option>
+          </select>
+
+          <label for="sel-detector">Detector</label>
+          <select id="sel-detector">
+            <option value="avg" selected>Average</option>
+            <option value="peak">Peak</option>
+          </select>
+
+          <label for="sel-palette">Colormap</label>
+          <select id="sel-palette">
+            <option value="sdrsharp" selected>SDR#</option>
+            <option value="turbo">Turbo</option>
+            <option value="viridis">Viridis</option>
+            <option value="classic">Classic Blue</option>
+            <option value="gray">Grayscale</option>
+          </select>
+        </div>
+
+        <div id="palette-swatch" class="swatch"></div>
+
+        <div class="form-grid">
+          <label for="rng-ema">EMA Smooth</label>
+          <div class="range-row">
+            <input id="rng-ema" type="range" min="0" max="0.9" step="0.05" value="0.25">
+            <output id="out-ema">0.25</output>
+          </div>
+
+          <label for="rng-db-min">Floor (dB)</label>
+          <div class="range-row">
+            <input id="rng-db-min" type="range" min="-130" max="-20" step="2" value="-100">
+            <output id="out-db-min">-100</output>
+          </div>
+
+          <label for="rng-db-max">Ceiling (dB)</label>
+          <div class="range-row">
+            <input id="rng-db-max" type="range" min="-60" max="10" step="2" value="0">
+            <output id="out-db-max">0</output>
+          </div>
+
+          <label for="rng-wf-contrast">Contrast Offset</label>
+          <div class="range-row">
+            <input id="rng-wf-contrast" type="range" min="-40" max="40" step="2" value="0">
+            <output id="out-wf-contrast">0</output>
+          </div>
+
+          <label for="rng-const-persist">Persistence</label>
+          <div class="range-row">
+            <input id="rng-const-persist" type="range" min="0" max="0.9" step="0.05" value="0.35">
+            <output id="out-const-persist">0.35</output>
+          </div>
+        </div>
+
+        <div class="checks">
+          <label><input id="chk-fill" type="checkbox" checked> Spectrum Fill</label>
+          <label><input id="chk-peak-hold" type="checkbox" checked> Peak Hold</label>
+          <label><input id="chk-wf-env" type="checkbox"> Envelope |z|</label>
+          <label><input id="chk-wf-auto" type="checkbox"> Auto Time Scale</label>
+        </div>
+
+        <div class="btn-row">
+          <button id="btn-auto-db" class="btn btn-sm" type="button">Auto dB Range</button>
+          <button id="btn-reset-zoom" class="btn btn-sm" type="button">Reset Zoom</button>
+          <button id="btn-clear-wf" class="btn btn-sm" type="button">Clear Waterfall/Peak</button>
+        </div>
+      </details>
+
+      <details class="section" open>
+        <summary>Bluetooth Advertising Decoder (BLE 2.4G)</summary>
+        <div class="checks" style="margin-top:6px">
+          <label><input id="chk-ble-enable" type="checkbox"> Enable Live BLE Decoding</label>
+        </div>
+        <div class="btn-row" style="margin-top:6px">
+          <button id="btn-ble-preset" class="btn btn-sm" type="button" title="Switch to 2.4G, Node 6 (RXFD 40M / 204.8us), 16384 words for BLE decoding">BLE Preset (Node 6)</button>
+          <button id="btn-ble-clear" class="btn btn-sm" type="button">Clear Records</button>
+        </div>
+        <p class="file-note" id="ble-status-note" style="margin-top:6px">
+          Disabled · Recommended: 2.4G + Node 6 + 16384 words (204.8us/frame covers Ch38 2426MHz)
+        </p>
+        <div id="ble-mini-list" class="ble-mini-list"></div>
+      </details>
+
+      <details class="section" open>
+        <summary>IQ Quality &amp; Hardware Stats</summary>
+        <dl class="stats-grid">
+          <dt>Samples</dt><dd id="st-count">0</dd>
+          <dt>Non-Zero</dt><dd id="st-nonzero">-</dd>
+          <dt>Transitions</dt><dd id="st-trans">-</dd>
+          <dt>I Range</dt><dd id="st-range-i">-</dd>
+          <dt>Q Range</dt><dd id="st-range-q">-</dd>
+          <dt>DC (I / Q)</dt><dd id="st-dc">-</dd>
+          <dt>RMS (I / Q)</dt><dd id="st-rms">-</dd>
+          <dt>Power / PAPR</dt><dd id="st-pwr">-</dd>
+          <dt>Clip / |ac1|</dt><dd id="st-ac1">-</dd>
+        </dl>
+        <div id="hex-preview" class="hex-preview">Waiting for IQ frames...</div>
+      </details>
+    </aside>
+
+    <main id="plots-grid" class="plots-grid" data-visible="4">
+      <section class="plot-card" data-pane="spectrum">
+        <div class="plot-header">
+          <div class="plot-title">
+            <span>1. Live Spectrum FFT</span>
+            <span id="meta-spectrum" class="plot-meta">-</span>
+          </div>
+          <div class="plot-actions">
+            <span class="plot-meta" title="Wheel zoom / Drag pan / Click marker / Double-click reset">Wheel Zoom</span>
+            <button class="btn btn-sm btn-max" data-pane="spectrum" type="button">Max</button>
+            <button class="btn btn-sm btn-close-pane" data-close-pane="spectrum" type="button" title="Close Pane">&times;</button>
+          </div>
+        </div>
+        <div class="canvas-wrap"><canvas id="cv-spectrum"></canvas></div>
+      </section>
+
+      <section class="plot-card" data-pane="time">
+        <div class="plot-header">
+          <div class="plot-title">
+            <span>3. Time Domain</span>
+            <span id="meta-time" class="plot-meta">-</span>
+          </div>
+          <div class="plot-actions">
+            <select id="sel-time-win" class="btn btn-sm" style="height:22px" title="Displayed sample window">
+              <option value="128">128</option>
+              <option value="256">256</option>
+              <option value="512" selected>512</option>
+              <option value="1024">1024</option>
+              <option value="2048">2048</option>
+              <option value="8192">8192</option>
+            </select>
+            <input id="rng-time-off" type="range" min="0" max="0" value="0" style="width:72px;accent-color:var(--accent)">
+            <button class="btn btn-sm btn-max" data-pane="time" type="button">Max</button>
+            <button class="btn btn-sm btn-close-pane" data-close-pane="time" type="button" title="Close Pane">&times;</button>
+          </div>
+        </div>
+        <div class="canvas-wrap"><canvas id="cv-time"></canvas></div>
+      </section>
+
+      <section class="plot-card" data-pane="waterfall">
+        <div class="plot-header">
+          <div class="plot-title">
+            <span>2. Waterfall</span>
+            <span id="meta-waterfall" class="plot-meta">0 rows</span>
+          </div>
+          <div class="plot-actions">
+            <span class="plot-meta">Linked to FFT X-axis</span>
+            <button class="btn btn-sm btn-max" data-pane="waterfall" type="button">Max</button>
+            <button class="btn btn-sm btn-close-pane" data-close-pane="waterfall" type="button" title="Close Pane">&times;</button>
+          </div>
+        </div>
+        <div class="canvas-wrap"><canvas id="cv-waterfall"></canvas></div>
+      </section>
+
+      <section class="plot-card" data-pane="constellation">
+        <div class="plot-header">
+          <div class="plot-title">
+            <span>4. I/Q Constellation</span>
+            <span id="meta-const" class="plot-meta">-</span>
+          </div>
+          <div class="plot-actions">
+            <label class="plot-meta">Gain</label>
+            <select id="sel-const-gain" class="btn btn-sm" style="height:22px">
+              <option value="1" selected>1×</option>
+              <option value="2">2×</option>
+              <option value="4">4×</option>
+              <option value="8">8×</option>
+            </select>
+            <button class="btn btn-sm btn-max" data-pane="constellation" type="button">Max</button>
+            <button class="btn btn-sm btn-close-pane" data-close-pane="constellation" type="button" title="Close Pane">&times;</button>
+          </div>
+        </div>
+        <div class="canvas-wrap"><canvas id="cv-constellation"></canvas></div>
+      </section>
+
+      <section class="plot-card ble-pane" data-pane="ble" hidden>
+        <div class="plot-header">
+          <div class="plot-title">
+            <span>5. BLE Advertising Decoder (BLE 1M)</span>
+            <span id="meta-ble" class="plot-meta">Disabled</span>
+          </div>
+          <div class="plot-actions">
+            <button id="btn-ble-pane-preset" class="btn btn-sm" type="button">Node 6 / 16384</button>
+            <button id="btn-ble-pane-clear" class="btn btn-sm" type="button">Clear</button>
+            <button class="btn btn-sm btn-max" data-pane="ble" type="button">Max</button>
+            <button class="btn btn-sm btn-close-pane" data-close-pane="ble" type="button" title="Close Pane">&times;</button>
+          </div>
+        </div>
+        <div class="ble-pane-body">
+          <div class="ble-table-wrap">
+            <table class="ble-table">
+              <thead>
+                <tr>
+                  <th>MAC / ID</th>
+                  <th>Ch</th>
+                  <th>PDU Type</th>
+                  <th>Len</th>
+                  <th>Hits</th>
+                  <th>RSSI</th>
+                  <th>CFO</th>
+                  <th>CRC24</th>
+                  <th>Decoded Info / Company / Hex Payload</th>
+                </tr>
+              </thead>
+              <tbody id="ble-dev-tbody"></tbody>
+            </table>
+          </div>
+          <div class="ble-log-wrap">
+            <div class="ble-log-hdr">Recent Advertising Packets</div>
+            <div id="ble-pkt-log" class="ble-pkt-log"></div>
+          </div>
+        </div>
+      </section>
+
+      <div id="empty-panes" class="empty-panes" hidden>
+        <p>All plot panes are hidden</p>
+        <button id="btn-restore-panes" class="btn btn-primary" type="button">Restore All Panes</button>
+      </div>
+    </main>
+  </div>
+
+  <div id="drop-overlay" class="drop-overlay">Drop IQ binary file to load (.bin / .s16le / .s32le / .cf32)</div>
+  <div id="toast" class="toast"></div>
+</body>
+</html>
