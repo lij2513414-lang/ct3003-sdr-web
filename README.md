@@ -24,15 +24,8 @@ A high-performance Software-Defined Radio (SDR) IQ stream analyzer and offline p
 
 ## UI Showcase
 
-> Tip: Save live screenshots of the running application as `docs/screenshot-dark.png` and `docs/screenshot-light.png`, then uncomment the image tags below to display them directly on your GitHub repository page.
+![Uploading image.png…]()
 
-<!-- Uncomment once screenshots are placed in docs/:
-### Default Dark Theme (shadcn/ui Default Dark)
-![CT3003 SDR IQ Stream Viewer - Dark Mode](docs/screenshot-dark.png)
-
-### Light Theme
-![CT3003 SDR IQ Stream Viewer - Light Mode](docs/screenshot-light.png)
--->
 
 ### Workspace Layout
 
