@@ -24,7 +24,8 @@ A high-performance Software-Defined Radio (SDR) IQ stream analyzer and offline p
 
 ## UI Showcase
 
-![Uploading image.png…]()
+<img width="2557" height="1220" alt="image" src="https://github.com/user-attachments/assets/43db1572-19fd-4e0f-9880-e2fbb52a38ac" />
+
 
 
 ### Workspace Layout
