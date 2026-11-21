@@ -34,7 +34,7 @@ import {
   type PaletteName,
 } from './render';
 import { BleDecoder, resolveChannels, type BlePacketHit } from './ble';
-import { computeRfSampleRateMhz, type RfApplyPayload, type Rf7976State } from './rf7976';
+import { computeRfSampleRateMhz, type RfApplyPayload, type Rf7976State, type Rf7976TempState } from './rf7976';
 
 export type SourceKind = 'ws' | 'http' | 'file' | 'synthetic';
 export type CaptureMode = 'api' | 'direct';
@@ -54,6 +54,7 @@ export interface BandRfInfo {
 export interface RfHwInfo {
   band0?: BandRfInfo;
   band1?: BandRfInfo;
+  temp?: Rf7976TempState;
 }
 
 export interface NodeProfile {
@@ -160,6 +161,10 @@ export interface SdrTelemetrySnapshot {
   tickText: string;
   tickKind: ConnKind;
   crText: string;
+  rfTempText: string;
+  rfTempKind: ConnKind;
+  rfTempTitle: string;
+  rfTemp: Rf7976TempState | null;
   fpsText: string;
   fpsTitle: string;
 
@@ -398,6 +403,10 @@ export class SdrEngine {
   private tickText = 'tick: -';
   private tickKind: ConnKind = '';
   private crText = 'cr0/9: -';
+  private rfTempText = 'temp: -';
+  private rfTempKind: ConnKind = '';
+  private rfTempTitle = 'MT7976 A-die SPI-B temperature';
+  private rfTemp: Rf7976TempState | null = null;
   private fpsText = '0.0 fps';
   private fpsTitle = 'RX frame rate';
   private hexPreview = 'Waiting for IQ frames...';
@@ -512,6 +521,10 @@ export class SdrEngine {
       tickText: this.tickText,
       tickKind: this.tickKind,
       crText: this.crText,
+      rfTempText: this.rfTempText,
+      rfTempKind: this.rfTempKind,
+      rfTempTitle: this.rfTempTitle,
+      rfTemp: this.rfTemp,
       fpsText: this.fpsText,
       fpsTitle: this.fpsTitle,
 
@@ -888,6 +901,18 @@ export class SdrEngine {
     this.connText = text;
   }
 
+  private applyTempTelemetry(temp: Rf7976TempState | undefined | null): void {
+    if (!temp || !temp.valid || typeof temp.temp_c !== 'number') {
+      return;
+    }
+    this.rfTemp = temp;
+    this.rfTempText = `temp: ${temp.temp_c}°C`;
+    this.rfTempKind = temp.temp_c >= 95 ? 'err' : temp.temp_c >= 80 ? 'warn' : 'ok';
+    const mcStr = typeof temp.temp_mc === 'number' ? ` (${(temp.temp_mc / 1000).toFixed(2)}°C)` : '';
+    const chipStr = typeof temp.chip_id === 'number' ? ` chip=0x${(temp.chip_id >>> 0).toString(16)}` : '';
+    this.rfTempTitle = `MT7976 A-die SPI-B (cs=5 0x030): ${temp.temp_c}°C${mcStr}, ADC=${temp.adc} (0x${temp.adc.toString(16)}), slope=${temp.slope ?? 182}, t_adc0=${temp.t_adc0 ?? 54}, t0=${temp.t0_c ?? 28}${chipStr}`;
+  }
+
   private formatStatusMeta(st: Record<string, unknown> | null): void {
     if (!st) return;
     if (st.fw_state != null) {
@@ -904,7 +929,11 @@ export class SdrEngine {
       this.crText = 'cr0/9: ' + cr0Hex + '/' + cr9Hex;
     }
     if (st.rf && typeof st.rf === 'object') {
-      this.lastRfInfo = st.rf as RfHwInfo;
+      const rfObj = st.rf as RfHwInfo;
+      this.lastRfInfo = rfObj;
+      if (rfObj.temp) {
+        this.applyTempTelemetry(rfObj.temp);
+      }
       this.applyNodeAndRfConfig(this.settings.node, { updateFormat: false, guardMode: false });
       this.scheduleRedraw();
     }
@@ -2060,6 +2089,7 @@ export class SdrEngine {
       }
       this.rfHwState = data as Rf7976State;
       this.rfControlV2 = true;
+      this.applyTempTelemetry(this.rfHwState.temp);
       return this.rfHwState;
     } catch (err) {
       this.rfError = err instanceof Error ? err.message : 'RF readback failed';
@@ -2098,6 +2128,7 @@ export class SdrEngine {
       }
       const st = data as Rf7976State;
       this.rfHwState = st;
+      this.applyTempTelemetry(st.temp);
       if (payload.sync_chinfo !== false) {
         this.mergeRfStateIntoChInfo(st, true);
         void this.refreshStatus();
@@ -2173,6 +2204,7 @@ export class SdrEngine {
       }
       const st = data as Rf7976State;
       this.rfHwState = st;
+      this.applyTempTelemetry(st.temp);
       this.mergeRfStateIntoChInfo(st, true);
       void this.refreshStatus();
       this.scheduleRedraw();
@@ -2500,6 +2532,10 @@ export class SdrEngine {
       })
       .catch(() => {
         this.serverOnline = false;
+        this.rfTemp = null;
+        this.rfTempText = 'temp: -';
+        this.rfTempKind = '';
+        this.rfHwState = null;
         this.setConnPill('', this.isFileProtocol ? 'file:// Offline' : 'Standalone Synth');
         this.settings = { ...this.settings, source: 'synthetic' };
         this.syncStreamDefaultForSource();

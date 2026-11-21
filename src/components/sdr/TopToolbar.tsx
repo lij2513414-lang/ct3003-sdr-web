@@ -140,6 +140,15 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
         ? 'text-amber-600 dark:text-amber-400'
         : 'text-muted-foreground';
 
+  const rfTempColorClass =
+    snapshot.rfTempKind === 'ok'
+      ? 'text-emerald-600 dark:text-emerald-400'
+      : snapshot.rfTempKind === 'warn'
+        ? 'text-amber-600 dark:text-amber-400'
+        : snapshot.rfTempKind === 'err'
+          ? 'text-destructive'
+          : 'text-muted-foreground';
+
   return (
     <header className="flex flex-none flex-wrap items-center gap-x-2 gap-y-1.5 border-b bg-background px-3 py-2">
       {/* Sidebar toggle + Brand */}
@@ -433,6 +442,13 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
         <span className={`whitespace-nowrap ${tickColorClass}`}>{snapshot.tickText}</span>
         <span className="text-muted-foreground/50" aria-hidden="true">·</span>
         <span className="text-muted-foreground whitespace-nowrap">{snapshot.crText}</span>
+        <span className="text-muted-foreground/50" aria-hidden="true">·</span>
+        <span
+          className={`whitespace-nowrap ${rfTempColorClass}`}
+          title={snapshot.rfTempTitle}
+        >
+          {snapshot.rfTempText}
+        </span>
         <span className="text-muted-foreground/50" aria-hidden="true">·</span>
         <span
           className="text-foreground font-medium whitespace-nowrap"

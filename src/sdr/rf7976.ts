@@ -70,6 +70,21 @@ export interface Rf7976FilterState {
   ddie_81044: number;
 }
 
+export interface Rf7976TempState {
+  valid: boolean;
+  temp_c: number;
+  temp_mc?: number;
+  adc: number;
+  adie_030?: number;
+  chip_id?: number;
+  adie_138?: number;
+  slope?: number;
+  t_adc0?: number;
+  t0_c?: number;
+  efuse_t0?: boolean;
+  protocol?: string;
+}
+
 export interface Rf7976State {
   ok: boolean;
   allow_tx: boolean;
@@ -83,8 +98,15 @@ export interface Rf7976State {
   rate: Rf7976RateState;
   rx: Rf7976RxGainState;
   filter: Rf7976FilterState;
+  temp?: Rf7976TempState;
   [ext: string]: unknown;
 }
+
+export const RF_SX0_LO_MIN_MHZ = 1824;
+export const RF_SX1_LO_MIN_MHZ = 4565;
+export const RF_SX0_VCO_MIN_MHZ = 5836.8;
+export const RF_SX1_VCO_MIN_MHZ = 7304.0;
+export const RF_VCO_MAX_MHZ = 9900;
 
 export interface RfApplyPayload {
   band?: 0 | 1;

@@ -19,7 +19,16 @@ import { Separator } from '@/components/ui/separator';
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import type { SdrEngine, SdrTelemetrySnapshot } from '@/src/sdr/engine';
-import { computeRfSampleRateMhz, fmtRfHex, RF_BW_OPTIONS, type Rf7976State } from '@/src/sdr/rf7976';
+import {
+  computeRfSampleRateMhz,
+  fmtRfHex,
+  RF_BW_OPTIONS,
+  RF_SX0_LO_MIN_MHZ,
+  RF_SX0_VCO_MIN_MHZ,
+  RF_SX1_LO_MIN_MHZ,
+  RF_SX1_VCO_MIN_MHZ,
+  type Rf7976State,
+} from '@/src/sdr/rf7976';
 
 export interface RfLocalExtensionProps {
   engine: SdrEngine;
@@ -82,6 +91,7 @@ export const RfControlSection: React.FC<RfControlSectionProps> = ({
 
   const [open, setOpen] = React.useState(true);
   const [loInput, setLoInput] = React.useState(String(settings.loMhz || 2462));
+  const [loValidationError, setLoValidationError] = React.useState('');
   const [loForceOn, setLoForceOn] = React.useState(false);
   const [ttgEnable, setTtgEnable] = React.useState(false);
 
@@ -97,13 +107,20 @@ export const RfControlSection: React.FC<RfControlSectionProps> = ({
 
   const [rcCode, setRcCode] = React.useState<number>(rfHwState?.filter.rc_code ?? 0x113);
 
+  const syncLoFromState = React.useCallback(
+    (st: Rf7976State | null | undefined) => {
+      if (st?.sx?.est_lo_mhz && st.sx.est_lo_mhz > 100) {
+        setLoInput(st.sx.est_lo_mhz.toFixed(3).replace(/\.000$/, ''));
+      } else if (settings.loMhz > 100) {
+        setLoInput(String(settings.loMhz));
+      }
+    },
+    [settings.loMhz]
+  );
+
   React.useEffect(() => {
-    if (rfHwState?.sx?.est_lo_mhz && rfHwState.sx.est_lo_mhz > 100) {
-      setLoInput(rfHwState.sx.est_lo_mhz.toFixed(3).replace(/\.000$/, ''));
-    } else if (settings.loMhz > 100) {
-      setLoInput(String(settings.loMhz));
-    }
-  }, [rfHwState?.sx?.est_lo_mhz, settings.band, settings.loMhz]);
+    syncLoFromState(rfHwState);
+  }, [rfHwState?.sx?.est_lo_mhz, settings.band, settings.loMhz, syncLoFromState]);
 
   React.useEffect(() => {
     const clampBw = (idx: number) =>
@@ -128,6 +145,10 @@ export const RfControlSection: React.FC<RfControlSectionProps> = ({
   }, [rfHwState?.filter?.rc_code]);
 
   const loPresets = settings.band === 1 ? LO_PRESETS_5G : LO_PRESETS_2G;
+  const loMinMhz = settings.band === 1 ? RF_SX1_LO_MIN_MHZ : RF_SX0_LO_MIN_MHZ;
+  const loMaxMhz = settings.band === 1 ? 7425 : 3712;
+  const loErrorBanner = loValidationError || rfError;
+  const activeTemp = rfHwState?.temp?.valid ? rfHwState.temp : snapshot.rfTemp?.valid ? snapshot.rfTemp : null;
   const nodeOptions = getNodeOptions(settings.band);
   const previewFsMhz = computeRfSampleRateMhz(settings.band, targetNode, bwIdx);
   const ratePending = targetNode !== settings.node || bwIdx !== settings.bw;
@@ -137,9 +158,25 @@ export const RfControlSection: React.FC<RfControlSectionProps> = ({
     ([, mod]) => typeof mod?.RfLocalPanel === 'function'
   );
 
+  React.useEffect(() => {
+    setLoValidationError('');
+  }, [settings.band]);
+
   const handleTuneLo = (freqMhz?: number) => {
     const val = freqMhz ?? parseFloat(loInput);
-    if (!Number.isFinite(val) || val < 1000) return;
+    if (!Number.isFinite(val)) {
+      setLoValidationError('Enter a valid LO frequency in MHz');
+      return;
+    }
+    if (val < loMinMhz || val > loMaxMhz) {
+      setLoValidationError(
+        settings.band === 1
+          ? `Band 1 SX1 LO range is ${RF_SX1_LO_MIN_MHZ}..${loMaxMhz} MHz (VCO ${RF_SX1_VCO_MIN_MHZ}..9900 MHz)`
+          : `Band 0 SX0 LO range is ${RF_SX0_LO_MIN_MHZ}..${loMaxMhz} MHz (VCO ${RF_SX0_VCO_MIN_MHZ}..9900 MHz)`
+      );
+      return;
+    }
+    setLoValidationError('');
     setLoInput(String(val));
     void engine.applyRfControl({ lo_mhz: val, sync_chinfo: rfSyncChInfo });
   };
@@ -208,7 +245,10 @@ export const RfControlSection: React.FC<RfControlSectionProps> = ({
             size="xs"
             variant="outline"
             disabled={disabled}
-            onClick={() => void engine.refreshRfState()}
+            onClick={() => {
+              setLoValidationError('');
+              void engine.refreshRfState().then((st) => syncLoFromState(st));
+            }}
             className="flex-1"
           >
             <RefreshCw className="size-3" /> Read
@@ -226,18 +266,47 @@ export const RfControlSection: React.FC<RfControlSectionProps> = ({
             size="xs"
             variant={rfHwState?.has_snapshot ? 'secondary' : 'outline'}
             disabled={disabled || !rfHwState?.has_snapshot}
-            onClick={() => void engine.restoreRf()}
+            onClick={() => {
+              setLoValidationError('');
+              void engine.restoreRf().then((st) => syncLoFromState(st));
+            }}
             className="flex-1"
           >
             <RotateCcw className="size-3" /> Restore
           </Button>
         </div>
 
-        {rfError && (
+        {loErrorBanner && (
           <div className="rounded bg-destructive/10 px-2 py-1 text-[11px] text-destructive break-words">
-            {rfError}
+            {loErrorBanner}
           </div>
         )}
+
+        <div
+          className="flex items-center justify-between gap-2 rounded border bg-muted/30 px-2 py-1 text-[10px] font-mono"
+          title={snapshot.rfTempTitle}
+        >
+          <span className="text-muted-foreground whitespace-nowrap">MT7976 Temp (cs=5)</span>
+          {activeTemp ? (
+            <span
+              className={`whitespace-nowrap ${
+                activeTemp.temp_c >= 95
+                  ? 'text-destructive font-medium'
+                  : activeTemp.temp_c >= 80
+                    ? 'text-amber-500 font-medium'
+                    : 'text-emerald-500 font-medium'
+              }`}
+            >
+              {activeTemp.temp_c}°C
+              {typeof activeTemp.temp_mc === 'number'
+                ? ` (${(activeTemp.temp_mc / 1000).toFixed(2)}°C)`
+                : ''}{' '}
+              · ADC 0x{activeTemp.adc.toString(16).toUpperCase().padStart(2, '0')}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">-- °C</span>
+          )}
+        </div>
 
         <Separator />
 
@@ -263,9 +332,14 @@ export const RfControlSection: React.FC<RfControlSectionProps> = ({
           <div className="flex items-center gap-1.5">
             <Input
               type="number"
+              min={loMinMhz}
+              max={loMaxMhz}
               step={0.5}
               value={loInput}
-              onChange={(e) => setLoInput(e.target.value)}
+              onChange={(e) => {
+                setLoInput(e.target.value);
+                if (loValidationError) setLoValidationError('');
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') handleTuneLo();
               }}
@@ -344,6 +418,9 @@ export const RfControlSection: React.FC<RfControlSectionProps> = ({
               {fmtRfHex(rfHwState.sx.reg_int)}
             </div>
           )}
+          <div className="font-mono text-[10px] text-muted-foreground leading-tight">
+            Min LO · SX0: {RF_SX0_LO_MIN_MHZ}M (5/16) · SX1: {RF_SX1_LO_MIN_MHZ}M (5/8)
+          </div>
         </div>
 
         <Separator />
