@@ -34,6 +34,7 @@ import {
   type PaletteName,
 } from './render';
 import { BleDecoder, resolveChannels, type BlePacketHit } from './ble';
+import { computeRfSampleRateMhz, type RfApplyPayload, type Rf7976State } from './rf7976';
 
 export type SourceKind = 'ws' | 'http' | 'file' | 'synthetic';
 export type CaptureMode = 'api' | 'direct';
@@ -171,6 +172,12 @@ export interface SdrTelemetrySnapshot {
   fileSampleCursor: number;
 
   rfSummaryText: string;
+  rfControlV2: boolean;
+  rfWf: 0 | 1;
+  rfSyncChInfo: boolean;
+  rfHwState: Rf7976State | null;
+  rfBusy: boolean;
+  rfError: string;
   timeMaxOffset: number;
 
   metaSpectrum: string;
@@ -312,7 +319,14 @@ export class SdrEngine {
   private nodeProfiles: Record<string, NodeProfile> = {};
   private lastRfInfo: RfHwInfo | null = null;
   private rfManualOverride = false;
+  private bwManualOverride = false;
   private streamManualOverride = false;
+  private rfControlV2 = false;
+  private rfWf: 0 | 1 = 0;
+  private rfSyncChInfo = true;
+  private rfHwState: Rf7976State | null = null;
+  private rfBusy = false;
+  private rfError = '';
 
   private ws: WebSocket | null = null;
   private wsLanes: AttachedWebSocket[] = [];
@@ -464,7 +478,7 @@ export class SdrEngine {
         ? 'No BLE on 5G'
         : chList.length
           ? chList.map((c) => 'Ch' + c.ch + '(' + c.freqMhz + 'M)').join('+')
-          : 'Out of passband';
+          : `Out of passband (${this.settings.loMhz.toFixed(1)}M ± ${(this.settings.fsMhz * 0.5).toFixed(0)}M · Click BLE Preset)`;
 
     const bleStatusNote = this.settings.bleEnabled
       ? `${chStr} · ${this.bleScannedFrames} frames · ${this.bleTotalHits} pkts / ${this.bleDevices.size} devs · CRC ${this.bleCrcPassCount}`
@@ -512,6 +526,12 @@ export class SdrEngine {
       fileSampleCursor: this.fileSampleCursor,
 
       rfSummaryText: this.formatRfSummary(this.lastRfInfo),
+      rfControlV2: this.rfControlV2,
+      rfWf: this.rfWf,
+      rfSyncChInfo: this.rfSyncChInfo,
+      rfHwState: this.rfHwState,
+      rfBusy: this.rfBusy,
+      rfError: this.rfError,
       timeMaxOffset,
 
       metaSpectrum: `${metaTag}${wfTag}${fftSize}pt · RBW ${rbwKhz.toFixed(1)} kHz`,
@@ -796,6 +816,21 @@ export class SdrEngine {
     return parts.length ? 'RF · ' + parts.join(' · ') : 'RF: Channels inactive';
   }
 
+  private computeHardwareFsMhz(band: 0 | 1, node: number, bwIdx: number): number {
+    const bandMeta = this.bandsMeta && this.bandsMeta[String(band)];
+    const prof = this.getNodeProfile(node);
+    if (node === 15) {
+      if (band === 1) {
+        return (bandMeta && bandMeta.adc_fs_mhz) || (prof && prof.fs_mhz_5g) || 160;
+      }
+      return (bandMeta && bandMeta.adc_fs_mhz) || (prof && prof.fs_mhz) || 80;
+    }
+    if (node === 6 || node === 8) {
+      return computeRfSampleRateMhz(band, node, bwIdx);
+    }
+    return (band === 1 ? prof?.fs_mhz_5g : prof?.fs_mhz) || (band === 1 ? 160 : 80);
+  }
+
   private applyNodeAndRfConfig(
     node: number,
     opts: { forceRf?: boolean; updateFormat?: boolean; guardMode?: boolean } = {}
@@ -806,6 +841,7 @@ export class SdrEngine {
     let nextMode = this.settings.mode;
     let nextFs = this.settings.fsMhz;
     let nextLo = this.settings.loMhz;
+    let nextBw = this.settings.bw;
 
     if (prof) {
       if (prof.format && opts.updateFormat !== false) {
@@ -817,7 +853,7 @@ export class SdrEngine {
     }
 
     if (!this.rfManualOverride || opts.forceRf) {
-      const bandIdx = this.settings.band === 1 ? 1 : 0;
+      const bandIdx: 0 | 1 = this.settings.band === 1 ? 1 : 0;
       const bandInfo = rf && (bandIdx === 1 ? rf.band1 : rf.band0);
       const bandMeta = this.bandsMeta && this.bandsMeta[String(bandIdx)];
       nextLo =
@@ -828,33 +864,19 @@ export class SdrEngine {
             : bandIdx === 1
               ? 5250
               : 2462;
-      if (node === 15) {
-        if (bandIdx === 1) {
-          nextFs =
-            bandInfo && bandInfo.bw_idx != null && bandInfo.bw_idx < 2
-              ? 80
-              : bandMeta && bandMeta.adc_fs_mhz
-                ? bandMeta.adc_fs_mhz
-                : prof && prof.fs_mhz_5g
-                  ? prof.fs_mhz_5g
-                  : 160;
-        } else {
-          nextFs =
-            bandMeta && bandMeta.adc_fs_mhz
-              ? bandMeta.adc_fs_mhz
-              : prof && prof.fs_mhz
-                ? prof.fs_mhz
-                : 80;
-        }
-      } else if (prof) {
-        nextFs = bandInfo && bandInfo.bw_mhz ? Math.max(40, bandInfo.bw_mhz) : prof.fs_mhz || 40;
+      if (!this.bwManualOverride && bandInfo && bandInfo.bw_idx != null && bandInfo.bw_idx <= 3) {
+        nextBw = bandIdx === 0 && bandInfo.bw_idx > 1 ? 1 : bandInfo.bw_idx;
+      } else if (bandIdx === 0 && nextBw > 1) {
+        nextBw = 1;
       }
+      nextFs = this.computeHardwareFsMhz(bandIdx, node, nextBw);
     }
 
     this.settings = {
       ...this.settings,
       format: nextFormat,
       mode: nextMode,
+      bw: nextBw,
       fsMhz: nextFs,
       loMhz: nextLo,
     };
@@ -1780,6 +1802,7 @@ export class SdrEngine {
     this.settings = { ...this.settings, band: bandIdx };
     if (changed && !opts.keepHistory) {
       this.rfManualOverride = false;
+      this.bwManualOverride = false;
       this.emaDb = null;
       this.peakDb = null;
       this.waterfall.clear();
@@ -1791,6 +1814,10 @@ export class SdrEngine {
     });
     this.emitSnapshot(true);
     this.scheduleRedraw();
+
+    if (changed && this.serverOnline && !this.demoMode && this.rfControlV2) {
+      void this.refreshRfState();
+    }
 
     if (changed && this.settings.source === 'synthetic' && !this.streaming) {
       const buf = generateSyntheticFrame(this.settings.synthPreset, this.settings.len, this.synthState);
@@ -1823,6 +1850,9 @@ export class SdrEngine {
     this.applyNodeAndRfConfig(node, { forceRf: fromPreset || !this.rfManualOverride });
     this.emitSnapshot(true);
     this.scheduleRedraw();
+    if (this.serverOnline && !this.demoMode && this.rfControlV2) {
+      void this.refreshRfState();
+    }
     if (this.streaming && this.settings.source === 'ws') {
       this.sendWsStart();
     }
@@ -1843,6 +1873,16 @@ export class SdrEngine {
       return;
     }
     this.settings = { ...this.settings, [key]: value };
+    if (key === 'bw' && typeof value === 'number' && !this.demoMode && !this.rfManualOverride) {
+      const clampedBw = this.settings.band === 0 && value > 1 ? 1 : Math.max(0, Math.min(3, value));
+      this.bwManualOverride = true;
+      this.settings = {
+        ...this.settings,
+        bw: clampedBw,
+        fsMhz: this.computeHardwareFsMhz(this.settings.band, this.settings.node, clampedBw),
+      };
+      this.scheduleRedraw();
+    }
     this.emitSnapshot(true);
     if (this.streaming && this.settings.source === 'ws') {
       this.sendWsStart();
@@ -1908,12 +1948,245 @@ export class SdrEngine {
 
   public syncHwRf(): void {
     this.rfManualOverride = false;
+    this.bwManualOverride = false;
     this.streamManualOverride = false;
     this.applyNodeAndRfConfig(this.settings.node, { forceRf: true });
     this.reprocessLastFrame();
     this.refreshStatus();
+    if (this.rfControlV2 && !this.demoMode) {
+      void this.refreshRfState();
+    }
     this.emitSnapshot(true);
     this.onNotify(`Synced hardware Fs / LO for Node ${this.settings.node}`, 'info');
+  }
+
+  public setRfWf(wf: 0 | 1): void {
+    const next: 0 | 1 = wf === 1 ? 1 : 0;
+    if (this.rfWf === next) return;
+    this.rfWf = next;
+    this.emitSnapshot(true);
+    if (this.serverOnline && !this.demoMode && this.rfControlV2) {
+      void this.refreshRfState(next);
+    }
+  }
+
+  public setRfSyncChInfo(sync: boolean): void {
+    this.rfSyncChInfo = !!sync;
+    this.emitSnapshot(true);
+  }
+
+  private mergeRfStateIntoChInfo(st: Rf7976State, forceScaleUpdate: boolean): void {
+    const prevNode = this.settings.node;
+    const prevBw = this.settings.bw;
+    const bandKey = st.band === 1 ? 'band1' : 'band0';
+    const loKhz = st.sx?.chinfo_lo_khz > 100000 ? st.sx.chinfo_lo_khz : st.sx?.est_lo_khz;
+    const loMhz = loKhz > 100000 ? loKhz / 1000 : undefined;
+
+    const curRf: RfHwInfo = { ...(this.lastRfInfo || {}) };
+    curRf[bandKey] = {
+      ...(curRf[bandKey] || {}),
+      lo_khz: loKhz,
+      lo_mhz: loMhz,
+      bw_idx: st.rate?.bw_idx,
+      bw_mhz: st.rate?.bw_mhz,
+      pri: st.rate?.pri_ch,
+      rx_n: st.rate?.rx_n,
+      tx_n: st.rate?.tx_n,
+    };
+    this.lastRfInfo = curRf;
+
+    if (forceScaleUpdate && st.band === this.settings.band) {
+      this.rfManualOverride = false;
+      this.bwManualOverride = false;
+      const nextNode = st.rate?.icap_node ? st.rate.icap_node : this.settings.node;
+      const nextBw = typeof st.rate?.bw_idx === 'number' && st.rate.bw_idx <= 3 ? st.rate.bw_idx : this.settings.bw;
+      const nodeOrBwChanged = nextNode !== prevNode || nextBw !== prevBw;
+      if (nodeOrBwChanged) {
+        this.settings = { ...this.settings, node: nextNode, bw: nextBw };
+      }
+      this.applyNodeAndRfConfig(this.settings.node, { forceRf: true, updateFormat: nextNode !== prevNode });
+      if (loMhz && st.sx?.chinfo_lo_khz > 100000) {
+        this.settings = { ...this.settings, loMhz };
+      }
+      if (st.rate?.active_fs_mhz > 0) {
+        this.settings = { ...this.settings, fsMhz: st.rate.active_fs_mhz };
+      }
+      if (nodeOrBwChanged && this.streaming && this.settings.source === 'ws') {
+        this.sendWsStart();
+      }
+    }
+  }
+
+  private syncCaptureRateFromRfState(st: Rf7976State): void {
+    if (st.band !== this.settings.band) return;
+    const prevNode = this.settings.node;
+    const prevBw = this.settings.bw;
+    const nextNode = st.rate?.icap_node ? st.rate.icap_node : prevNode;
+    const nextBw = typeof st.rate?.bw_idx === 'number' && st.rate.bw_idx <= 3 ? st.rate.bw_idx : prevBw;
+    const nodeOrBwChanged = nextNode !== prevNode || nextBw !== prevBw;
+    this.bwManualOverride = false;
+    this.settings = {
+      ...this.settings,
+      node: nextNode,
+      bw: nextBw,
+      fsMhz: st.rate?.active_fs_mhz > 0 ? st.rate.active_fs_mhz : this.settings.fsMhz,
+    };
+    if (nextNode !== prevNode) {
+      const prof = this.getNodeProfile(nextNode);
+      if (prof?.format) this.settings = { ...this.settings, format: prof.format };
+      if (prof?.direct_stream_safe === false && this.settings.mode === 'direct') {
+        this.settings = { ...this.settings, mode: 'api' };
+      }
+      this.syncStreamDefaultForSource();
+    }
+    this.scheduleRedraw();
+    if (nodeOrBwChanged && this.streaming && this.settings.source === 'ws') {
+      this.sendWsStart();
+    }
+  }
+
+  public async refreshRfState(wfOverride?: 0 | 1): Promise<Rf7976State | null> {
+    if (!this.serverOnline || this.demoMode || !this.getRouterHttpBase()) return null;
+    const wf = wfOverride !== undefined ? wfOverride : this.rfWf;
+    const qs = `?band=${this.settings.band}&wf=${wf}&node=${this.settings.node}`;
+    this.rfBusy = true;
+    this.rfError = '';
+    this.emitSnapshot(true);
+    try {
+      const res = await fetch(this.apiUrl('/api/rf/state' + qs), { cache: 'no-store' });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      this.rfHwState = data as Rf7976State;
+      this.rfControlV2 = true;
+      return this.rfHwState;
+    } catch (err) {
+      this.rfError = err instanceof Error ? err.message : 'RF readback failed';
+      return null;
+    } finally {
+      this.rfBusy = false;
+      this.emitSnapshot(true);
+    }
+  }
+
+  public async applyRfControl(patch: RfApplyPayload): Promise<Rf7976State | null> {
+    if (!this.serverOnline || this.demoMode || !this.getRouterHttpBase()) {
+      this.onNotify('Connect to a live CT3003 router first', 'warning');
+      return null;
+    }
+    const payload: RfApplyPayload = {
+      band: this.settings.band,
+      wf: this.rfWf,
+      node: this.settings.node,
+      sync_chinfo: this.rfSyncChInfo,
+      ...patch,
+    };
+    this.rfBusy = true;
+    this.rfError = '';
+    this.emitSnapshot(true);
+    try {
+      const res = await fetch(this.apiUrl('/api/rf/apply'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        cache: 'no-store',
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      const st = data as Rf7976State;
+      this.rfHwState = st;
+      if (payload.sync_chinfo !== false) {
+        this.mergeRfStateIntoChInfo(st, true);
+        void this.refreshStatus();
+        this.scheduleRedraw();
+      } else if (
+        patch.icap_node != null ||
+        patch.bw_idx != null ||
+        patch.bw_mhz != null ||
+        patch.sample_rate_mhz != null
+      ) {
+        this.syncCaptureRateFromRfState(st);
+      }
+      return st;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'RF apply failed';
+      this.rfError = msg;
+      this.onNotify(msg, 'error');
+      return null;
+    } finally {
+      this.rfBusy = false;
+      this.emitSnapshot(true);
+    }
+  }
+
+  public async snapshotRf(): Promise<boolean> {
+    if (!this.serverOnline || this.demoMode || !this.getRouterHttpBase()) return false;
+    this.rfBusy = true;
+    this.rfError = '';
+    this.emitSnapshot(true);
+    try {
+      const res = await fetch(this.apiUrl('/api/rf/snapshot'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ band: this.settings.band, wf: this.rfWf }),
+        cache: 'no-store',
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      if (this.rfHwState) {
+        this.rfHwState = { ...this.rfHwState, has_snapshot: true };
+      }
+      this.onNotify(`Saved RF baseline snapshot (${data.count} regs)`, 'success');
+      void this.refreshRfState();
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'RF snapshot failed';
+      this.rfError = msg;
+      this.onNotify(msg, 'error');
+      return false;
+    } finally {
+      this.rfBusy = false;
+      this.emitSnapshot(true);
+    }
+  }
+
+  public async restoreRf(): Promise<Rf7976State | null> {
+    if (!this.serverOnline || this.demoMode || !this.getRouterHttpBase()) return null;
+    this.rfBusy = true;
+    this.rfError = '';
+    this.emitSnapshot(true);
+    try {
+      const res = await fetch(this.apiUrl('/api/rf/restore'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ node: this.settings.node }),
+        cache: 'no-store',
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      const st = data as Rf7976State;
+      this.rfHwState = st;
+      this.mergeRfStateIntoChInfo(st, true);
+      void this.refreshStatus();
+      this.scheduleRedraw();
+      this.onNotify('Restored MT7976 baseline RF snapshot', 'success');
+      return st;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'RF restore failed';
+      this.rfError = msg;
+      this.onNotify(msg, 'error');
+      return null;
+    } finally {
+      this.rfBusy = false;
+      this.emitSnapshot(true);
+    }
   }
 
   public setDisplayOption<
@@ -2028,21 +2301,74 @@ export class SdrEngine {
   }
 
   public applyBlePreset(): void {
+    const curLo = this.settings.band === 0 ? this.settings.loMhz : 0;
+    const curCh = resolveChannels(curLo, 40);
+    const needTune =
+      curCh.length === 0 || curCh.every((c) => Math.abs(c.fOffMhz) < 2.0);
+    const curBwIdx =
+      this.rfHwState?.rate?.bw_idx ??
+      this.lastRfInfo?.band0?.bw_idx ??
+      this.settings.bw;
+    const needHwApply =
+      this.serverOnline &&
+      !this.demoMode &&
+      this.rfControlV2 &&
+      (needTune || curBwIdx !== 0);
+
+    // Under 20 MHz BW (Node 6 -> 40 Msps, 204.8 us per 16384w frame), 2434 MHz
+    // places BLE Ch38 (2426 MHz) at -8 MHz inside the analog passband and clear of DC.
+    const targetLo = needTune ? 2434 : curLo;
+
     this.settings = {
       ...this.settings,
       bleEnabled: true,
       panes: { ...this.settings.panes, ble: true },
+      band: 0,
       node: 6,
       len: 16384,
       bw: 0,
+      loMhz: needHwApply || !this.serverOnline || this.demoMode ? targetLo : this.settings.loMhz,
+      fsMhz: 40,
     };
-    this.setBand(0, { skipRestart: true, forceRf: true });
-    this.rfManualOverride = false;
-    this.applyNodeAndRfConfig(6, { forceRf: true });
-    this.bleDecoder.resetNoiseFloor();
     if (this.serverOnline && this.settings.source !== 'ws') {
       this.settings = { ...this.settings, source: 'ws' };
     }
+    this.rfManualOverride = false;
+    this.bwManualOverride = false;
+    this.bleDecoder.resetNoiseFloor();
+
+    if (needHwApply) {
+      this.rfManualOverride = true;
+      this.emitSnapshot(true);
+      this.scheduleRedraw();
+      if (this.streaming && this.settings.source === 'ws') {
+        this.sendWsStart();
+      }
+      void this.applyRfControl({
+        band: 0,
+        wf: this.rfWf,
+        lo_mhz: targetLo,
+        bw_idx: 0,
+        icap_node: 6,
+        sync_chinfo: true,
+      }).then((st) => {
+        if (st) {
+          this.bleDecoder.resetNoiseFloor();
+          const msg = needTune
+            ? `Applied BLE preset: tuned ${targetLo} MHz @ 20 MHz (Ch38 2426 MHz, 40 Msps)`
+            : 'Applied BLE preset: switched BW to 20 MHz (Node 6, 40 Msps)';
+          this.onNotify(msg, 'success');
+        } else {
+          this.rfManualOverride = false;
+        }
+      });
+      return;
+    }
+
+    if (!this.rfControlV2) {
+      this.applyNodeAndRfConfig(6, { forceRf: true });
+    }
+    this.syncStreamDefaultForSource();
     this.emitSnapshot(true);
     this.scheduleRedraw();
     if (this.streaming && this.settings.source === 'ws') {
@@ -2141,6 +2467,7 @@ export class SdrEngine {
         this.serverOnline = true;
         this.demoMode = !!cfg.demo;
         this.directRouter = !!cfg.direct_router;
+        this.rfControlV2 = !!cfg.rf_control_v2;
         if (cfg.bands) this.bandsMeta = cfg.bands;
         if (cfg.node_profiles) this.nodeProfiles = cfg.node_profiles;
 
@@ -2167,6 +2494,9 @@ export class SdrEngine {
 
         this.connectWebSocket();
         if (typeof WebSocket === 'undefined') this.refreshStatus();
+        if (this.rfControlV2 && !this.demoMode) {
+          void this.refreshRfState();
+        }
       })
       .catch(() => {
         this.serverOnline = false;

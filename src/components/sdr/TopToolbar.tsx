@@ -44,12 +44,17 @@ const SOURCE_LABELS: Record<SourceKind, string> = {
 const NODE_PRESET_LABELS: Record<string, string> = {
   '15': '15 · ADC WF1/0 (12b)',
   '6': '6 · RXFD WF1/0 (14b)',
-  '8': '8 · RXFD WF2/0 (14b)',
+  '8': '8 · RXFE/WF2 (14b)',
   custom: 'Custom',
 };
 
 const LEN_OPTIONS = [1024, 2048, 4096, 8192, 16384];
-const BW_OPTIONS = [0, 1, 2, 3];
+const BW_OPTIONS: Array<{ idx: number; label: string; shortLabel: string }> = [
+  { idx: 0, label: '0 · 20 MHz', shortLabel: '0·20M' },
+  { idx: 1, label: '1 · 40 MHz', shortLabel: '1·40M' },
+  { idx: 2, label: '2 · 80 MHz (5G)', shortLabel: '2·80M' },
+  { idx: 3, label: '3 · 160 MHz (5G)', shortLabel: '3·160M' },
+];
 const FPS_OPTIONS: Array<{ value: number; label: string }> = [
   { value: 0, label: 'Unlimited' },
   { value: 400, label: '400 Hz' },
@@ -328,13 +333,20 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             if (v !== null) engine.setCaptureOption('bw', parseInt(v, 10));
           }}
         >
-          <SelectTrigger size="sm" className="w-[54px] font-mono text-xs tabular-nums">
-            <SelectValue>{settings.bw}</SelectValue>
+          <SelectTrigger size="sm" className="w-[78px] font-mono text-xs tabular-nums">
+            <SelectValue>
+              {BW_OPTIONS[settings.bw]?.shortLabel ?? String(settings.bw)}
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             {BW_OPTIONS.map((b) => (
-              <SelectItem key={b} value={String(b)} className="font-mono text-xs">
-                {b}
+              <SelectItem
+                key={b.idx}
+                value={String(b.idx)}
+                disabled={settings.band === 0 && b.idx > 1}
+                className="font-mono text-xs"
+              >
+                {b.label}
               </SelectItem>
             ))}
           </SelectContent>

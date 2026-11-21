@@ -39,6 +39,7 @@ import type {
 } from '@/src/sdr/dsp';
 import { getPaletteCssGradient, type PaletteName } from '@/src/sdr/render';
 import type { SdrEngine, SdrTelemetrySnapshot } from '@/src/sdr/engine';
+import { RfControlSection } from './RfControlSection';
 
 const SYNTH_LABELS: Record<SynthPreset, string> = {
   ofdm_wifi: 'Wi-Fi OFDM Carriers',
@@ -403,6 +404,9 @@ export const ControlSidebar: React.FC<ControlSidebarProps> = ({
               </>
             )}
           </SidebarSection>
+
+          {/* MT7976 RF Protocol Control */}
+          <RfControlSection engine={engine} snapshot={snapshot} />
 
           {/* 2. Format & RF Scale */}
           <SidebarSection title="Format & RF Scale" defaultOpen>

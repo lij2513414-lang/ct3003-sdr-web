@@ -358,7 +358,7 @@ export const PlotsGrid: React.FC<PlotsGridProps> = ({ engine, snapshot }) => {
                   <TableRow className="hover:bg-transparent">
                     <TableCell colSpan={9} className="py-6 text-center text-muted-foreground">
                       {settings.bleEnabled
-                        ? 'Listening for BLE 1M advertising packets on 2.4 GHz (Ch 37/38/39)...'
+                        ? `Listening for BLE 1M advertising packets on 2.4 GHz (${snapshot.bleStatusNote})`
                         : 'Enable Live BLE Decoding or apply Node 6 / 16384 preset to scan.'}
                     </TableCell>
                   </TableRow>
